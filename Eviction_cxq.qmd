@@ -1,0 +1,1198 @@
+---
+title: "Eviction Risk in Philadelphia"
+author:
+  - "Lingxuan Gao"
+  - "Xiaoqing Chen"
+date: "`r Sys.Date()`"
+format:
+  html:
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+# Introduction
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE
+)
+
+Sys.setlocale("LC_TIME", "English")
+```
+
+## Load Libraries
+
+```{r load_libraries}
+# Core tidyverse
+library(tidyverse)
+library(lubridate)
+
+# Spatial data
+library(sf)
+library(tigris)
+
+# Census data
+library(tidycensus)
+
+# Weather data
+library(riem)  # For Philadelphia weather from ASOS stations
+
+# Visualization
+library(viridis)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+# Get rid of scientific notation. We gotta look good!
+options(scipen = 999)
+```
+
+## Define Themes
+
+```{r themes}
+plotTheme <- theme(
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 10),
+  plot.caption = element_text(size = 8),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title = element_text(size = 11, face = "bold"),
+  panel.background = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.ticks = element_blank(),
+  legend.position = "right"
+)
+
+mapTheme <- theme(
+  plot.title = element_text(size = 14, face = "bold"),
+  plot.subtitle = element_text(size = 10),
+  plot.caption = element_text(size = 8),
+  axis.line = element_blank(),
+  axis.text = element_blank(),
+  axis.ticks = element_blank(),
+  axis.title = element_blank(),
+  panel.background = element_blank(),
+  panel.border = element_blank(),
+  panel.grid.major = element_line(colour = 'transparent'),
+  panel.grid.minor = element_blank(),
+  legend.position = "right",
+  plot.margin = margin(1, 1, 1, 1, 'cm'),
+  legend.key.height = unit(1, "cm"),
+  legend.key.width = unit(0.2, "cm")
+)
+
+palette5 <- c("#eff3ff", "#bdd7e7", "#6baed6", "#3182bd", "#08519c")
+```
+
+# 1. Data Source
+
+## Load and clean all the datasets
+
+```{r load data}
+
+# Monthly totals vs baseline (city-wide)
+philly_barchart <- readr::read_csv("data/philadelphia_barchart.csv") %>%
+  mutate(
+    date = lubridate::my(month)
+  )
+
+# Claims severity over time
+philly_claims_monthly <- readr::read_csv("data/philadelphia_claims_monthly.csv") %>%
+  mutate(
+    month_date = lubridate::ymd(month_date)
+  )
+
+# Group-level (race, gender, etc.) monthly trends
+philly_linechart <- readr::read_csv("data/philadelphia_linechart.csv") %>%
+  mutate(
+    month_date = lubridate::my(month)
+  )
+
+# Census tract map snapshot
+philly_map <- readr::read_csv("data/philadelphia_map.csv") %>%
+  mutate(
+   GEOID = as.character(id),
+    month_date = lubridate::dmy(month_date)
+  )
+
+# Tract-level monthly pre/post pandemic
+philly_monthly <- readr::read_csv("data/philadelphia_monthly_2020_2021.csv") %>%
+  mutate(
+    month_date = lubridate::my(month)
+  )
+
+# Tract-level weekly 
+weekly <- readr::read_csv("data/philadelphia_weekly_2020_2021.csv") %>%
+  mutate(
+    week_date = lubridate::ymd(week_date)
+  )
+
+# Code / license violations (point data, older)
+li_violations <- readr::read_csv("data/li_violations.csv")
+
+# Hotspot properties (top filers)
+hotspots <- readr::read_csv("data/philadelphia_hotspots_media_report.csv") %>%
+  mutate(
+    time_period = lubridate::ymd(time_period),
+    end_date    = lubridate::ymd(end_date)
+  )
+
+
+
+```
+
+Now we have: - **City-level series** (`philly_barchart`) - **Tract-level monthly data over multiple years** (`philly_monthly`) - **Snapshot map** (`philly_map`) - **Group-level disparities** (`philly_linechart`) - **Structural context** (historical violations, hotspot landlords)
+
+# 2. Exploratory Data Analysis
+
+## 2.1 Citywide filings over time
+
+We reorganized the monthly eviction-filing counts by grouping each month into a season (Winter, Spring, Summer, Fall). We computed four separate seasonal baselines:
+
+the historical average for Winter/Spring/Summer/Fall months
+
+Then we produced a four-panel faceted plot to let us compare each season to what is “normal” for that season.
+
+```{r season}
+
+library(tidyverse)
+library(lubridate)
+
+# Add season column
+philly_barchart2 <- philly_barchart %>%
+  mutate(
+    # extract month number
+    m = month(date),
+    season = case_when(
+      m %in% c(12, 1, 2) ~ "Winter",
+      m %in% c(3, 4, 5)  ~ "Spring",
+      m %in% c(6, 7, 8)  ~ "Summer",
+      m %in% c(9, 10, 11) ~ "Fall"
+    )
+  )
+
+# Calculate true seasonal averages
+season_baseline <- philly_barchart2 %>%
+  group_by(season) %>%
+  summarise(season_avg = mean(month_filings, na.rm = TRUE))
+
+season_baseline
+
+
+```
+
+```{r seaon chart}
+
+ggplot(philly_barchart2, aes(x = date, y = month_filings)) +
+  geom_col(fill = "#3182bd") +
+  geom_hline(
+    data = season_baseline,
+    aes(yintercept = season_avg),
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ season, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Monthly Eviction Filings by Season",
+    subtitle = "Each panel shows filings and seasonal baseline",
+    x = "Date",
+    y = "Eviction filings"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold", size = 13),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+**Patterns:**
+
+1.Eviction filings were heavily suppressed across all seasons in 2020–2021. Every season shows extremely low activity during the early pandemic period.
+
+2.Beginning in 2022, filings rebound sharply—but not uniformly across seasons. -Summer 2022 displays one of the largest spikes in the dataset. -Fall and Spring quickly rise back to their historical levels. -Winter rebounds more unevenly but eventually stabilizes. So the seasonal cut reveals that the return to “normal” was staggered, with some seasons experiencing larger surges than others.
+
+3.From 2023 onward, virtually every season settles at or slightly above its long-term seasonal baseline. This indicates a new post-pandemic equilibrium where eviction activity has stabilized.
+
+```{r eda_claim_severity}
+# Median claim over time
+p1 <- ggplot(philly_claims_monthly, aes(x = month_date, y = median_claim)) +
+  geom_line() +
+  geom_hline(aes(yintercept = median_claim_baseline), linetype = "dashed") +
+  labs(
+    title = "Median Eviction Claim Over Time",
+    x = "Month",
+    y = "Median claim amount ($)",
+    caption = "Dashed line: pre-pandemic median claim"
+  ) +
+  plotTheme
+
+# Share of very small vs very large claims
+philly_claims_long <- philly_claims_monthly %>%
+  select(month_date, sub1000, sub_med_rent, over_six_months_rent) %>%
+  pivot_longer(
+    cols = -month_date,
+    names_to = "claim_type",
+    values_to = "share"
+  ) %>%
+  mutate(
+    claim_type = recode(
+      claim_type,
+      sub1000             = "Claims < $1,000",
+      sub_med_rent        = "Claims < median rent",
+      over_six_months_rent = "Claims > 6 months of rent"
+    )
+  )
+
+p2 <- ggplot(philly_claims_long, aes(x = month_date, y = share, color = claim_type)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Distribution of Claim Sizes Over Time",
+    x = "Month",
+    y = "Share of filings",
+    color = NULL
+  ) +
+  plotTheme +
+  theme(legend.position = "bottom")
+
+gridExtra::grid.arrange(p1, p2, ncol = 1)
+```
+
+**Patterns:**
+
+1.The chart shows that the median claim amount in eviction cases rose significantly after the pandemic, remaining consistently higher than pre-pandemic levels. It peaked around 2022, then declined slightly but remained elevated.
+
+2.When grouped by amount, the proportion of small claims (<$1,000), claims below median rent, and large claims exceeding 6 months' rent remained largely unchanged over time within the overall caseload.
+
+3.In summary, the primary shift reflects an “overall upward shift in typical claim amounts” rather than a significant change in the proportion of extremely small or large cases. This indicates a general increase in the level of rent arrears, not a sudden surge in extreme cases.
+
+## 2.2 Tract-level risk and spatial patterns
+
+We uses the multi-year tract-level monthly data to see how skewed filings are across tracts.
+
+```{r eda_tract_distribution}
+tract_annual <- philly_monthly %>%
+  group_by(GEOID) %>%
+  summarize(
+    total_filings = sum(filings_2020, na.rm = TRUE),
+    mean_monthly  = mean(filings_2020, na.rm = TRUE),
+    n_months      = n(),
+    .groups = "drop"
+  )
+
+# Add a vertical line at the 80th percentile (top 20%)
+p80 <- quantile(tract_annual$mean_monthly, 0.80, na.rm = TRUE)
+
+ggplot(tract_annual, aes(x = mean_monthly)) +
+  geom_histogram(bins = 30, fill = "#3182bd") +
+  geom_vline(xintercept = p80, linetype = "dashed", color = "red") +
+  labs(
+    title = "Distribution of Mean Monthly Eviction Filings per Tract",
+    subtitle = paste0("Dashed line = 80th percentile (candidate high-risk cutoff: ",
+                      round(p80, 2), " filings/month)"),
+    x = "Mean monthly filings (multi-year)",
+    y = "Number of tracts"
+  ) +
+  plotTheme
+
+```
+
+This histogram shows that most census tracts have very low average eviction activity—often fewer than 2 filings per month.A small number of tracts sit far to the right, with 5–10+ filings per month, meaning they experience consistently high eviction pressure over multiple years. So eviction risk in Philly is highly **concentrated**, not evenly spread, which supports focusing limited legal aid and rent subsidies on that right-tail group of chronic hotspot tracts.
+
+### Load Spatial Data
+
+```{r}
+
+library(sf)
+library(tidyverse)
+library(viridis)
+library(lubridate)
+
+# Read your GeoJSONs
+boundary <- st_read("data/City_Limits.geojson")
+pa_tracts <- st_read("data/PA-tracts.geojson")
+
+# Join eviction data with tract geometry
+philly_tracts <- pa_tracts %>%
+  filter(str_starts(GEOID, "42101"))
+
+philly_map <- philly_map %>%
+  mutate(id = as.character(id))
+
+philly_tracts <- philly_tracts %>%
+  mutate(GEOID = as.character(GEOID))
+
+
+map_sf <- philly_tracts %>%
+  left_join(philly_map, by = c("GEOID" = "id"))
+```
+
+### Eviction rate map since Nov 2024
+
+```{r}
+
+ggplot(
+  map_sf %>% filter(!is.na(month_rate))
+) +
+  geom_sf(aes(fill = month_rate), color = NA) +
+  scale_fill_viridis(option = "magma", direction = -1) +
+  labs(
+    title = "Eviction Filing Rate by Census Tract (Nov 2024–Nov 2025)",
+    fill  = "Eviction Rate"
+  ) +
+  coord_sf(datum = NA) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(size = 14, face = "bold")
+  )
+
+
+```
+
+```{r}
+
+map_compare <- map_sf %>%
+  mutate(
+    # month_diff is a ratio vs baseline
+    diff_vs_baseline = month_diff - 1
+  )
+
+ggplot(
+  map_compare %>% filter(!is.na(diff_vs_baseline))
+) +
+  geom_sf(aes(fill = diff_vs_baseline), color = NA) +
+  scale_fill_gradient2(
+    low  = "#4575b4",
+    mid  = "white",
+    high = "#d73027",
+    midpoint = 0,
+    labels = scales::percent_format(accuracy = 1),
+    name = "Change vs baseline\n(2023–24)"
+  ) +
+  labs(
+    title    = "Eviction Filing Rate by Census Tract",
+    subtitle = "Nov 2024–Nov 2025 vs typical 2023–2024 rate"
+  ) +
+  coord_sf(datum = NA) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(size = 14, face = "bold"),
+    plot.subtitle   = element_text(size = 10)
+  )
+
+
+```
+
+Philly isn’t on fire everywhere—a handful of neighborhoods are overheating while others are holding steady or cooling down. Those red clusters are exactly where we’d point legal aid and rent relief first.
+
+### Persistence of high-risk tracts (spatial pattern)
+
+```{r}
+threshold <- quantile(map_sf$month_rate, 0.8, na.rm = TRUE)
+
+tract_risk <- map_sf %>%
+  st_drop_geometry() %>%                        # strip geometry
+  mutate(high = if_else(month_rate >= threshold, 1L, 0L)) %>%
+  group_by(GEOID) %>%
+  summarise(
+    times_high = sum(high, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+risk_sf <- philly_tracts %>%
+  left_join(tract_risk, by = "GEOID")          # now y is NOT sf → OK
+
+ggplot(risk_sf) +
+  geom_sf(aes(fill = times_high), color = NA) +
+  scale_fill_viridis_c(option = "inferno") +
+  labs(
+    title = "Persistence of High Eviction Risk Across Tracts",
+    fill  = "Months above 80th percentile"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r eda_group_disparities}
+philly_linechart_share <- philly_linechart %>%
+  group_by(month) %>%
+  mutate(
+    share = month_filings / sum(month_filings, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(month_date = lubridate::my(month))  # "11/2024" → 2024-11-01
+
+ggplot(
+  philly_linechart_share,
+  aes(x = month_date, y = share, color = group)
+) +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title    = "Share of Eviction Filings by Group Over Time",
+    subtitle = "Each month: group's filings / total filings",
+    x = "Month",
+    y = "Share of filings",
+    color = "Group"
+  ) +
+  plotTheme +
+  theme(legend.position = "bottom")
+
+```
+
+### Hotspot landlords (top eviction filers)
+
+```{r}
+hotspot_sf <- st_as_sf(
+  hotspots,
+  coords = c("lon", "lat"),
+  crs = 4326
+)
+
+ggplot() +
+  geom_sf(data = boundary, fill = "grey95", color = NA) +
+  geom_sf(data = hotspot_sf, aes(size = filings), alpha = 0.6, color = "#d7301f") +
+  scale_size(range = c(1, 10)) +
+  labs(
+    title = "Top Eviction-Filing Landlords in Philadelphia",
+    subtitle = "Bubble size shows number of filings",
+    size = "Filings"
+  ) +
+  theme_minimal()
+```
+
+# 3.Get Philadelphia Spatial Context
+
+Now we shift from “describe” to “explain”:\
+We want to add **structural predictors**:
+
+-   Demographics & housing (ACS)\
+-   Landlord concentration (hotspots)\
+-   Housing quality (old violations)
+
+## 3.1 Base tract list
+
+```{r spatial_base}
+# One row per tract ID from the joined spatial layer
+tract_base <- map_sf %>%
+  sf::st_drop_geometry() %>%
+  dplyr::distinct(GEOID) %>%
+  dplyr::arrange(GEOID)
+```
+
+## 3.2 Add ACS demographics & housing
+
+```{r spatial_acs, message=FALSE, warning=FALSE}
+acs_vars <- c(
+  total_pop  = "B01003_001",  # total population
+  pov_total  = "B17001_001",  # poverty universe
+  pov_below  = "B17001_002",  # below poverty
+  occ_total  = "B25003_001",  # occupied housing units
+  occ_renter = "B25003_003",  # renter-occupied units
+  med_rent   = "B25064_001",  # median gross rent
+  white      = "B03002_003",
+  black      = "B03002_004",
+  hispanic   = "B03002_012"
+)
+
+acs_philly <- tidycensus::get_acs(
+  geography = "tract",
+  state     = "PA",
+  county    = "Philadelphia",
+  survey    = "acs5",
+  year      = 2022,
+  variables = acs_vars,
+  output    = "wide",
+  geometry  = FALSE
+) %>%
+  dplyr::transmute(
+    GEOID,
+    total_pop    = total_popE,
+    pov_rate     = dplyr::if_else(pov_totalE > 0, pov_belowE / pov_totalE, NA_real_),
+    renter_share = dplyr::if_else(occ_totalE > 0, occ_renterE / occ_totalE, NA_real_),
+    med_rent     = med_rentE,
+    pct_black    = dplyr::if_else(total_popE > 0, blackE / total_popE, NA_real_),
+    pct_hispanic = dplyr::if_else(total_popE > 0, hispanicE / total_popE, NA_real_)
+  )
+
+# Attach ACS to tract base and to the spatial object
+tract_context <- tract_base %>%
+  left_join(acs_philly, by = "GEOID")
+
+map_sf_context <- map_sf %>%       # or map_sf_context if you’d already created it
+  left_join(acs_philly, by = "GEOID")
+```
+
+## 3.3 Add landlord hotspot intensity
+
+```{r spatial_hotspots, message=FALSE, warning=FALSE}
+# Hotspot landlords as points (you already use this for the bubble map)
+hotspot_sf <- sf::st_as_sf(
+  hotspots,
+  coords = c("lon", "lat"),
+  crs = 4326
+) %>%
+  sf::st_transform(sf::st_crs(map_sf_context))
+
+# Spatial join: assign each hotspot property to a tract
+hotspots_by_tract <- sf::st_join(
+  hotspot_sf,
+  map_sf_context["GEOID"],
+  left = FALSE
+) %>%
+  sf::st_drop_geometry() %>%
+  dplyr::group_by(GEOID) %>%
+  dplyr::summarise(
+    hotspot_filings     = sum(filings, na.rm = TRUE),
+    n_hotspot_props     = dplyr::n(),
+    n_hotspot_landlords = dplyr::n_distinct(xplaintiff),
+    .groups = "drop"
+  )
+
+map_sf_context <- map_sf_context %>%
+  dplyr::left_join(hotspots_by_tract, by = "GEOID") %>%
+  dplyr::mutate(
+    dplyr::across(
+      c(hotspot_filings, n_hotspot_props, n_hotspot_landlords),
+      ~ tidyr::replace_na(., 0)
+    )
+  )
+```
+
+## 3.4 Add historic code-violation intensity
+
+```{r spatial_violations, message=FALSE, warning=FALSE}
+# Violations as points
+li_violations_sf <- sf::st_as_sf(
+  li_violations,
+  coords = c("lng", "lat"),
+  crs = 4326
+) %>%
+  sf::st_transform(sf::st_crs(map_sf_context))
+
+# Join each violation to a tract
+viol_by_tract <- sf::st_join(
+  li_violations_sf,
+  map_sf_context["GEOID"],
+  left = FALSE
+) %>%
+  sf::st_drop_geometry() %>%
+  dplyr::group_by(GEOID) %>%
+  dplyr::summarise(
+    violations_total = dplyr::n(),
+    violations_types = dplyr::n_distinct(violationdescription),
+    .groups = "drop"
+  )
+
+map_sf_context <- map_sf_context %>%
+  dplyr::left_join(viol_by_tract, by = "GEOID") %>%
+  dplyr::mutate(
+    violations_total = tidyr::replace_na(violations_total, 0),
+    violations_types = tidyr::replace_na(violations_types, 0),
+    viol_per_1k = dplyr::if_else(
+      total_pop > 0,
+      1000 * violations_total / total_pop,
+      NA_real_
+    )
+  )
+```
+
+## 3.5 311 housing-related complaint data
+
+```{r add_311_housing, message=FALSE, warning=FALSE}
+library(janitor)
+
+housing_types <- c(
+  "Dangerous Building Complaint",
+  "Construction Complaints",
+  "Maintenance Complaint",
+  "Sanitation Violation",
+  "Sanitation / Dumpster Violation",
+  "Dumpster Violation",
+  "Fire Safety Complaint",
+  "Smoke Detector",
+  "Graffiti Removal",
+  "Homeless Encampment Request"
+)
+
+housing311_raw <- readr::read_csv("data/public_cases_fc.csv") %>%
+  janitor::clean_names() %>%                # SERVICE_NAME -> service_name, etc.
+  dplyr::filter(service_name %in% housing_types) %>%
+  dplyr::filter(!is.na(lon), !is.na(lat)) %>%   # adjust if your columns are lon/lat
+  dplyr::mutate(
+    request_date = as.Date(requested_datetime),   # change name if needed
+    year         = lubridate::year(request_date)
+  ) %>%
+  dplyr::filter(year >= 2020)               # recent years only
+
+
+```
+
+```{r agg_311_by_tract}
+housing311_sf <- housing311_raw %>%
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  sf::st_transform(sf::st_crs(map_sf))
+
+housing311_tract <- sf::st_join(
+  housing311_sf,
+  map_sf["GEOID"],
+  left = FALSE
+)
+
+housing311_by_tract <- housing311_tract %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(GEOID, name = "housing311_count") %>%
+  dplyr::left_join(
+    tract_context %>% dplyr::select(GEOID, total_pop),
+    by = "GEOID"
+  ) %>%
+  dplyr::mutate(
+    housing311_per_1k = dplyr::if_else(
+      total_pop > 0,
+      1000 * housing311_count / total_pop,
+      NA_real_
+    )
+  ) %>%
+  dplyr::select(GEOID, housing311_per_1k)
+```
+
+# 4.Build & Compare Predictive Models
+
+## 4.1 Build tract-year panel
+
+```{r}
+#--- Build tract-year panel and high-risk label -----------------------------
+
+model_df <- philly_monthly %>% 
+  mutate(
+    # turn month string into Date, then extract year
+    month_date = lubridate::my(month),
+    year       = lubridate::year(month_date)
+  ) %>% 
+  group_by(GEOID, year) %>% 
+  summarise(
+    filings_year = sum(filings_2020, na.rm = TRUE),
+    mean_monthly = mean(filings_2020, na.rm = TRUE),
+    n_months     = n(),
+    .groups = "drop"
+  ) %>% 
+  # keep only years with reasonably complete data
+  filter(n_months >= 10) %>% 
+  group_by(year) %>% 
+  mutate(
+    cutoff80 = quantile(mean_monthly, 0.80, na.rm = TRUE),
+    high_risk = if_else(mean_monthly >= cutoff80, 1L, 0L)
+  ) %>% 
+  ungroup() %>% 
+  arrange(GEOID, year) %>% 
+  group_by(GEOID) %>% 
+  mutate(
+    # lagged eviction intensity: last year's mean filings
+    lag_mean_monthly = dplyr::lag(mean_monthly)
+  ) %>% 
+  ungroup() %>% 
+  # drop first year per tract where we don't have a lag value
+  filter(!is.na(lag_mean_monthly))
+
+```
+
+
+```{r}
+#--- Train / test split by year --------------------------------------------
+train <- model_df %>% 
+  filter(year <= 2023)   # choose training years here
+test  <- model_df %>% 
+  filter(year == 2024)   # hold-out evaluation year
+
+#--- Create year factor with treatment (dummy) coding ----------------------
+train <- train %>% 
+  mutate(year_factor = factor(year))
+
+```
+
+## 4.2 Build Model 1-5
+
+### Model 1: Baseline (Lagged Eviction History)
+
+```{r}
+#--- Run the baseline logistic regression ----------------------------------
+model1 <- glm(
+  high_risk ~ lag_mean_monthly,
+  data   = train,
+  family = binomial()
+)
+
+summary(model1)
+```
+Lagged mean monthly filings is a strong predictor: each additional filing per month last year is associated with roughly a 2.7-fold increase in the odds of a tract being in the high-risk group this year.
+
+###  Model 2: Add year fixed effects
+
+Model 2 builds on Model 1 by adding year fixed effects to capture citywide policy and economic shocks.
+
+```{r}
+test <- model_df_acs %>%
+  filter(year == 2024) %>%
+  filter(
+    !is.na(lag_mean_monthly),
+    !is.na(pov_rate),
+    !is.na(renter_share),
+    !is.na(med_rent),
+    !is.na(pct_black),
+    !is.na(pct_hispanic)
+  ) %>%
+  mutate(
+    year_factor = factor(year, levels = levels(train$year_factor))
+  )
+
+# Set contrasts to treatment coding (dummy variables, baseline = first year)
+contrasts(train$year_factor) <- contr.treatment(length(levels(train$year_factor)))
+
+model2 <- glm(
+  high_risk ~ lag_mean_monthly + year_factor,
+  data   = train,
+  family = binomial()
+)
+
+summary(model2)
+```
+
+Holding year constant, each additional filing per month last year is associated with about a 4.4-fold increase in the odds that a tract is in the high-risk group this year. Adding year fixed effects substantially improves model fit (AIC drops from 805 to 674), suggesting that citywide shocks across years matter in predicting high-risk tracts.
+
+###  Model 3: Add ACS & Housing Variables
+
+Model 3 extends Model 2 by adding neighborhood socioeconomic and housing variables from the ACS. These covariates capture structural vulnerabilities that extend beyond historical eviction records and annual effects by adding the effects of economic hardship, housing cost pressure, structural inequality and real rental market.
+
+```{r}
+# 1. Merge tract-level ACS context onto the modeling panel
+
+# ACS variables such as:
+#  - pov_rate            : share of residents below poverty line
+#  - renter_share        : share of households that are renters
+#  - med_rent            : median gross rent
+#  - pct_black           : share of residents who are Black
+#  - pct_hispanic        : share of residents who are Hispanic
+
+model_df_acs <- model_df %>% 
+  left_join(
+    tract_context %>% 
+      select(
+        GEOID,
+        pov_rate,
+        renter_share,
+        med_rent,
+        pct_black,
+        pct_hispanic
+      ),
+    by = "GEOID"
+  )
+
+# Drop rows with missing ACS data
+model_df_acs <- model_df_acs %>% 
+  filter(
+    !is.na(pov_rate),
+    !is.na(renter_share),
+    !is.na(med_rent),
+    !is.na(pct_black),
+    !is.na(pct_hispanic)
+  )
+
+```
+
+```{r}
+# 2. Build model 3: Add ACS & Housing Variables
+train <- model_df_acs %>% 
+  filter(year <= 2023) %>% 
+  mutate(
+    year_factor = factor(year)
+  )
+
+test <- model_df_acs %>% 
+  filter(year == 2024)
+
+
+model3 <- glm(
+  high_risk ~ lag_mean_monthly +
+    year_factor +
+    pov_rate +
+    renter_share +
+    med_rent +
+    pct_black +
+    pct_hispanic,
+  data   = train,
+  family = binomial()
+)
+
+summary(model3)
+```
+1. Holding neighborhood characteristics and year constant, each additional eviction filing per month last year multiplies the odds of being in the high-risk group by almost 4.
+
+2. After controlling for past evictions and neighborhood characteristics, tracts in 2023 are much less likely to be high-risk than in 2021 – the odds are only about 7% of the 2021 level. This captures a strong city-wide drop, consistent with policy changes or post-pandemic recovery.”
+
+3. 2022 looks somewhat riskier than 2021, but the difference is only marginally significant statistically.
+
+4. Neighborhoods with a higher share of renter households are significantly more likely to end up in the high-risk group. Roughly, a 10-percentage-point increase in renter share raises the odds of being high-risk by about 17%, holding everything else constant.
+
+### Model 4: Add Housing Quality & Landlord Variables
+
+To answer the main question: After controlling for historical evictions, year, and ACS structural characteristics, are neighborhoods with high levels of building violations and “high-frequency evicting landlords” additionally more dangerous?
+
+We extend Model 3 by adding two tract-level indicators:
+
+1. Violations_total: the total number of housing code violations recorded in the tract, capturing poor housing quality and weak property maintenance.
+
+2. Hotspot_filings: the total number of eviction filings from “hotspot” landlords/buildings in the tract, capturing aggressive landlord behavior.
+
+If their coefficients are positive, it means that even after controlling for past eviction levels and neighborhood demographics, tracts with more violations and more filings from hotspot landlords are systematically more likely to be high-risk.
+
+```{r}
+# Compute code-violation rate per 1,000 residents
+viol_rate_by_tract <- tract_context %>% 
+  select(GEOID, total_pop) %>% 
+  left_join(
+    viol_by_tract %>% select(GEOID, violations_total),
+    by = "GEOID"
+  ) %>% 
+  mutate(
+    # violations per 1,000 residents; if total_pop is 0 or NA, set to NA
+    viol_per_1k = if_else(
+      !is.na(total_pop) & total_pop > 0,
+      violations_total / (total_pop / 1000),
+      NA_real_
+    )
+  )
+```
+
+
+```{r}
+# Add violation rate to modeling dataframe
+model_df_acs <- model_df_acs %>% 
+  left_join(
+    viol_rate_by_tract %>% select(GEOID, viol_per_1k),
+    by = "GEOID"
+  ) %>%
+  left_join(
+    hotspots_by_tract %>% select(GEOID, hotspot_filings),
+    by = "GEOID"
+  )
+
+# Rebuild train / test
+train <- model_df_acs %>% 
+  filter(year <= 2023) %>% 
+  mutate(year_factor = factor(year))
+test <- model_df_acs %>% 
+  filter(year == 2024)
+
+# Build Model 4: Add housing quality & landlord variables
+model4 <- glm(
+  high_risk ~ lag_mean_monthly +
+    year_factor +
+    pov_rate +
+    renter_share +
+    med_rent +
+    pct_black +
+    pct_hispanic +
+    viol_per_1k +       
+    hotspot_filings,   
+  data   = train,
+  family = binomial()
+)
+
+summary(model4)
+
+```
+
+```{r}
+model4 <- glm(
+  high_risk ~ lag_mean_monthly +
+    year_factor +
+    pov_rate +
+    renter_share +
+    med_rent +
+    pct_black +
+    pct_hispanic +
+    viol_per_1k +           
+    hotspot_filings,      
+  data   = train,
+  family = binomial()
+)
+
+summary(model4)
+```
+
+1. Holding everything else constant, each additional eviction filing per month last year increases the odds of being a high-risk tract by about 65%.
+
+2. In this subset of tracts, 2022 was substantially riskier than 2021, even after controlling for neighborhood characteristics and past evictions.
+
+3. Within this sample, high-risk tracts tend to have lower median rents, consistent with eviction risk concentrating in lower-cost, more distressed markets.
+
+4. The coefficient on code-violation rate is positive but not statistically significant, suggesting that poor housing quality is associated with eviction risk but our data are not precise enough to estimate the effect with confidence.
+
+5. Every additional 10 filings from hotspot landlords in a tract increases the odds of being high-risk by roughly 35%. This suggests that a small set of serial evictors play a disproportionate role in driving neighborhood-level risk.
+
+In short, after adding code-violation rates and hotspot landlord filings, past eviction intensity and hotspot activity emerge as the strongest predictors of high-risk tracts. Median rent is negatively associated with risk – evictions concentrate in lower-rent neighborhoods – and each additional 10 filings from hotspot landlords increases the odds of being high risk by roughly 30–35%. These results support targeted enforcement and outreach in areas with substandard housing and serial eviction filers.
+
+### Model 5: Add 311 complaints + spatial distance
+
+In our final specification, we add the rate of housing-related 311 complaints and a simple spatial feature – distance to Center City – on top of Model 4.
+
+```{r}
+# 1. Add 311 complaint rate (per 1k) to modeling dataframe
+model_df_acs <- model_df_acs %>%
+  left_join(
+    housing311_by_tract %>% 
+      select(GEOID, housing311_per_1k),
+    by = "GEOID"
+  )
+
+# 2. Create spatial feature: distance to City Hall (km)
+tract_centroids <- philly_tracts %>%
+  select(GEOID) %>%
+  st_centroid()
+
+  # Philadelphia City Hall
+city_hall <- st_sfc(
+  st_point(c(-75.1635, 39.9526)), 
+  crs = 4326
+) %>%
+  st_transform(st_crs(tract_centroids))
+
+dist_to_center_km <- as.numeric(st_distance(tract_centroids, city_hall)) / 1000
+
+dist_spatial <- tract_centroids %>%
+  st_drop_geometry() %>%
+  mutate(dist_center_km = dist_to_center_km)
+
+model_df_acs <- model_df_acs %>%
+  left_join(dist_spatial, by = "GEOID")
+```
+
+```{r}
+# Training data: tract-years up to 2023, with complete data on all predictors
+train <- model_df_acs %>%
+  filter(year <= 2023) %>%
+  filter(
+    !is.na(lag_mean_monthly),
+    !is.na(pov_rate),
+    !is.na(renter_share),
+    !is.na(med_rent),
+    !is.na(pct_black),
+    !is.na(pct_hispanic),
+    !is.na(viol_per_1k),
+    !is.na(hotspot_filings),
+    !is.na(housing311_per_1k),
+    !is.na(dist_center_km)
+  ) %>%
+  mutate(
+    year_factor = factor(year)   # year fixed effects
+  )
+
+# Test data: 2024 tract-years, same complete-case requirement
+test <- model_df_acs %>%
+  filter(year == 2024) %>%
+  filter(
+    !is.na(lag_mean_monthly),
+    !is.na(pov_rate),
+    !is.na(renter_share),
+    !is.na(med_rent),
+    !is.na(pct_black),
+    !is.na(pct_hispanic),
+    !is.na(viol_per_1k),
+    !is.na(hotspot_filings),
+    !is.na(housing311_per_1k),
+    !is.na(dist_center_km)
+  ) %>%
+  mutate(
+    year_factor = factor(
+      "2023",                        
+      levels = levels(train$year_factor)
+    )
+  )
+```
+
+```{r}
+# Build model 5: Add 311 complaints + spatial distance
+model5 <- glm(
+  high_risk ~ lag_mean_monthly +    
+    year_factor +                  
+    pov_rate +                      
+    renter_share +                
+    med_rent +                     
+    pct_black +                    
+    pct_hispanic +                 
+    viol_per_1k +                   
+    hotspot_filings +               
+    housing311_per_1k +             
+    dist_center_km,                
+  data   = train,
+  family = binomial()
+)
+
+summary(model5)
+```
+1. Compared with 2021, 2022 tract-years are about four to five times more likely to be high-risk, after controlling for neighborhood characteristics.
+
+2. Holding everything else constant, high-risk tracts tend to have lower median rents, consistent with evictions concentrating in lower-cost, more distressed markets.
+
+3. Every additional 10 filings from hotspot landlords in a tract raises the odds of being high-risk by roughly 35%. Serial evictors are a key driver of neighborhood-level risk.
+
+4. 311 housing complaint rates are positively signed but statistically indistinguishable from zero once we control for past evictions and structural risk factors.
+
+
+## 4.3 Model Evaluation and Comparison
+
+### Calculate Predictions and MAE
+
+```{r}
+# Get predicted probabilities on the test set
+test <- test %>%
+  mutate(
+    pred1 = predict(model1, newdata = test, type = "response"),
+    pred2 = predict(model2, newdata = test, type = "response"),
+    pred3 = predict(model3, newdata = test, type = "response"),
+    pred4 = predict(model4, newdata = test, type = "response"),
+    pred5 = predict(model5, newdata = test, type = "response")
+  )
+
+```
+
+```{r}
+# Build model comparison table (AIC + MAE + Accuracy)
+# 1) AIC
+aic_vec <- c(
+  AIC(model1),
+  AIC(model2),
+  AIC(model3),
+  AIC(model4),
+  AIC(model5)
+)
+
+# 2) MAE
+mae_vec <- c(
+  mean(abs(test$pred1 - test$high_risk), na.rm = TRUE),
+  mean(abs(test$pred2 - test$high_risk), na.rm = TRUE),
+  mean(abs(test$pred3 - test$high_risk), na.rm = TRUE),
+  mean(abs(test$pred4 - test$high_risk), na.rm = TRUE),
+  mean(abs(test$pred5 - test$high_risk), na.rm = TRUE)
+)
+
+# 3) Accuracy：Use 0.5 as the threshold
+class1 <- ifelse(test$pred1 >= 0.5, 1L, 0L)
+class2 <- ifelse(test$pred2 >= 0.5, 1L, 0L)
+class3 <- ifelse(test$pred3 >= 0.5, 1L, 0L)
+class4 <- ifelse(test$pred4 >= 0.5, 1L, 0L)
+class5 <- ifelse(test$pred5 >= 0.5, 1L, 0L)
+
+acc_vec <- c(
+  mean(class1 == test$high_risk, na.rm = TRUE),
+  mean(class2 == test$high_risk, na.rm = TRUE),
+  mean(class3 == test$high_risk, na.rm = TRUE),
+  mean(class4 == test$high_risk, na.rm = TRUE),
+  mean(class5 == test$high_risk, na.rm = TRUE)
+)
+
+# 4) Build data frame
+model_names <- c(
+  "1. Lag history only",
+  "2. + Year fixed effects",
+  "3. + ACS & housing",
+  "4. + Violations & hotspot landlords",
+  "5. + 311 complaints & spatial"
+)
+
+model_compare <- data.frame(
+  Model      = model_names,
+  AIC        = aic_vec,
+  MAE      = mae_vec,
+  Accuracy   = acc_vec
+)
+
+model_compare
+```
+
+### Visualize Model Comparison
+
+```{r}
+# Visualize AIC (lower is better)
+library(ggplot2)
+
+ggplot(model_compare,
+       aes(x = reorder(Model, AIC), y = AIC)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = round(AIC, 1)),
+            vjust = -0.4, size = 3) +
+  labs(
+    title    = "Model Fit: AIC on Training Data",
+    subtitle = "Lower AIC = better fit with penalty for complexity",
+    x        = "Model specification",
+    y        = "AIC"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+# Visualize MAE by model (lower is better)
+ggplot(model_compare,
+       aes(x = reorder(Model, MAE), y = MAE)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = round(MAE, 3)),
+            vjust = -0.4, size = 3) +
+  labs(
+    title    = "Out-of-sample Performance: MAE on Test Set",
+    subtitle = "Lower MAE = better predictive accuracy for 2024",
+    x        = "Model specification",
+    y        = "Mean Absolute Error"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+# Visualize Accuracy (higher is better)
+ggplot(model_compare,
+       aes(x = reorder(Model, -Accuracy), y = Accuracy)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = round(Accuracy, 3)), vjust = -0.4, size = 3) +
+  labs(
+    title    = "Model Performance: Classification Accuracy (Test Set)",
+    subtitle = "Threshold = 0.5 on predicted risk",
+    x        = "Model specification",
+    y        = "Accuracy"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Conclusion:
+
+Although Model 2 achieves the lowest MAE and slightly better overall predictive performance, it uses only lagged evictions and year fixed effects, so the information it provides is limited. We therefore treat Model 2 as our operational prediction model, useful for forecasting which tracts are most likely to be high-risk next year. For policy analysis and communication with city officials, however, we rely on Model 3, which adds ACS and housing variables such as poverty, renter share, rent levels, and race/ethnicity. Model 3 keeps prediction error very close to Model 2 but offers a much richer and more interpretable picture of why certain neighborhoods face higher eviction risk. In short, Model 2 is best for targeting, while Model 3 is best for understanding and designing equitable interventions, so we base our main analysis on Model 3.
+
+
+
+
+
+
+
+
